@@ -1,6 +1,5 @@
 const puppeteer = require('puppeteer');
 const sqlite3 = require('sqlite3').verbose();
-const useProxy = require('@lem0-packages/puppeteer-page-proxy');
 const axios = require('axios');
 
 const proxyUser = 'xjkpsblg';
@@ -101,7 +100,24 @@ function alreadyScraped(db, pageToCheck) {
       if (row) {
         resolve(row.success); // Resolve the promise with the `success` value
       } else {
-        resolve(null); // Resolve as null if no row is found
+        resolve(false); // Resolve as null if no row is found
+      }
+    });
+  });
+}
+
+function getNotScrapedPage(db) {
+  return new Promise((resolve, reject) => {
+    db.get("SELECT MIN(page) AS page FROM scrape_results WHERE success = false", [], (err, row) => {
+      if (err) {
+        reject(err); // Reject the promise if there's an error
+        return;
+      }
+
+      if (row) {
+        resolve(row.page); // Resolve the promise with the `success` value
+      } else {
+        resolve(null); // Resolve as false if no row is found
       }
     });
   });
@@ -110,6 +126,7 @@ function alreadyScraped(db, pageToCheck) {
 // Function to insert data into the websites table
 function insertWebsiteData(db, website, ip) {
     const stmt = db.prepare('INSERT INTO websites (website, ip) VALUES (?, ?)');
+    console.log(`Inserting ${website} with IP ${ip}`);
     stmt.run(website, ip, function(err) {
         if (err) {
             console.error('Error inserting data into websites table:', err);
@@ -134,9 +151,7 @@ function insertScrapeResult(db, page, success) {
 }
 
 // Function to scrape a page
-async function scrapePage(pageNum, db, browser, proxy) {
-	// console.log(`using proxy: ${proxy}`)
-
+async function scrapePage(pageNum, db, browser) {
     const page = await browser.newPage();
 	await page.authenticate({
 		username: proxyUser, 
@@ -144,37 +159,60 @@ async function scrapePage(pageNum, db, browser, proxy) {
 	  });
 
     await page.setRequestInterception(true);
-      page.on('request', request => {
+    page.on('request', request => {
         const resourceType = request.resourceType();
-        if (['image', 'stylesheet', 'font'].includes(resourceType)) {
+        if (['image', 'font'].includes(resourceType)) {
           request.abort(); // Block these resources
         } else {
-          //useProxy(request, `${proxy}`);
           request.continue();
         }
-      });
+    });
+
+
+	try {
+		while (pageNum) {
+		    const waitForOneSecond = () => new Promise(resolve => setTimeout(resolve, 1000));
+            await waitForOneSecond();
+		    const scraped = await alreadyScraped(db, pageNum)  
+		    if (scraped == false) {
+			    await scrapeWebsiteTable(db, page, pageNum)
+			}
+		    pageNum = await getNotScrapedPage(db)
+		    if (pageNum == null) {
+				pageNum = await clickOnNextPage(page)
+			} else {
+				await openPage(page, pageNum)
+			}
+		}
+	} catch(error) {
+		 console.error(`Failed to scrape page ${pageNum}:`, error);
+	} finally {
+		 await page.close();
+	}
+}
+
+async function openPage(page, pageNum) {
+    console.log(`Opening new page ${pageNum} from url...`);
     const url = `https://myip.ms/browse/sites/${pageNum}/ipID/23.227.38.0/ipIDii/23.227.38.255/sort/6/asc/1`;
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+}
 
-    let success = false;
+async function scrapeWebsiteTable(db, page, pageNum) {
+   let success = false;
     try {
-        console.log(`Navigating to page ${pageNum}...`);
-        await page.goto(url, { waitUntil: 'domcontentloaded' });
-
         await page.waitForSelector('a#tablink-1.ui-tabs-anchor'); // Adjust the selector if necessary
           // Extract the text content
           const text = await page.$eval('a#tablink-1.ui-tabs-anchor', el => el.textContent);
           // Log the result
           if (text.includes("You have exceeded page visit limit")) {
-            console.log("exceeded ratelimit for current ip/proxy");
-             process.exit()
-		    // throw `exceeded limit for proxy: ${proxy}`;
+            // console.log("exceeded ratelimit for current ip/proxy");
+             // process.exit()
+		     throw `exceeded ratelimit for current ip/proxy`;
           } else {
             // console.log("Text not found.");
           }
 
         await page.waitForSelector('#sites_tbl'); // Ensure the table is loaded
-
-
         // Extract data from the table
         const data = await page.evaluate(() => {
             const rows = Array.from(document.querySelectorAll('#sites_tbl tbody tr'));
@@ -187,6 +225,9 @@ async function scrapePage(pageNum, db, browser, proxy) {
 
         // Log the scraped data (you can store it in your database here)
         console.log(`Scraped ${data.length} rows from page ${pageNum}`);
+		if (data.length == 0) {
+         throw `failed to scrape page ${pageNum}, zero items found`;
+		}
 
         // Store the scraped data in the SQLite database
         data.forEach(item => insertWebsiteData(db, item.website, item.ip));
@@ -198,10 +239,47 @@ async function scrapePage(pageNum, db, browser, proxy) {
     } finally {
         // Insert the result for this page (whether it succeeded or failed)
         insertScrapeResult(db, pageNum, success);
-
-        // Close the browser
-        await page.close();
     }
+}
+
+async function clickOnNextPage(page) {
+		let nextPage = null
+		try {
+		await page.waitForSelector('div.aqPsites_tbl.aqPaging');
+		nextPage = await page.evaluate(() => {
+        // Find the parent div
+        const parentDiv = document.querySelector('div.aqPsites_tbl.aqPaging');
+        if (!parentDiv) return false;
+
+        // Get all anchor tags within the div
+        const links = Array.from(parentDiv.querySelectorAll('a'));
+
+        // Find the index of the currently selected anchor tag
+        const currentIndex = links.findIndex(link => link.classList.contains('aqPagingSel'));
+        if (currentIndex === -1 || currentIndex === links.length - 1) {
+            // Either no selected link or the current one is the last in the list
+            return false;
+        }
+
+        // Get the next anchor tag
+        const nextLink = links[currentIndex + 1];
+        if (nextLink) {
+		    const pageNumber = nextLink.textContent.trim();
+            nextLink.click(); // Click the next link
+            return pageNumber;
+        }
+        return null;
+    });
+		} catch(error) {
+			throw `failed to click on next page: ${error}`
+		} finally {
+		   if (nextPage) {
+    	       console.log(`Next page clicked! Link text: "${nextPage}"`);
+		   	return nextPage
+    	   } else {
+    	       throw 'Failed to click the next page (maybe already on the last page).';
+    	   }
+		}
 }
 
 // Main function to handle pagination and store results in SQLite
@@ -212,17 +290,17 @@ async function scrapeData() {
     const browser = await puppeteer.launch({
         headless: false, // Launch Chrome with UI (non-headless mode)
         executablePath: '/usr/bin/google-chrome', // Specify the path to your installed Chrome
-        args: ['--no-sandbox', '--disable-setuid-sandbox', `--proxy-server=${proxyList[9]}`],
+        args: ['--no-sandbox', '--disable-setuid-sandbox', `--proxy-server=${proxyList[3]}`],
     });
 
-    const proxyHost = await createRoundRobin();
+    //const proxyHost = await createRoundRobin();
 
     // Loop through pages 1 to 13500 (or any other number you choose)
     for (let pageNum = 1; pageNum <= 13500; pageNum++) {
         const scraped = await alreadyScraped(db, pageNum);
-		if (scraped == null || scraped == false) {
+		if (scraped == false) {
 		   console.log(`Scraping page ${pageNum}...`);
-           await scrapePage(pageNum, db, browser, proxyHost());
+           await scrapePage(pageNum, db, browser);
 		} else { 
 		   console.log(`Already scraped page ${pageNum}`);
 		}
