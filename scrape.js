@@ -1,6 +1,5 @@
 const puppeteer = require('puppeteer');
 const sqlite3 = require('sqlite3').verbose();
-const axios = require('axios');
 
 const proxyUser = 'xjkpsblg';
 const proxyPass = 'ql6ktu3k13bm';
@@ -15,41 +14,6 @@ const proxyList = [
 ,'154.36.110.199:6853'
 ,'173.0.9.70:5653'
 ,'173.0.9.209:5792']
-
-
-async function populateProxyList() {
-  try {
-    // API endpoint
-    const apiUrl = 'https://proxylist.geonode.com/api/proxy-list?protocols=socks5&limit=100&page=1&sort_by=lastChecked&sort_type=desc';
-
-    // Fetch proxy data from the API
-    const response = await axios.get(apiUrl);
-    const proxies = response.data.data;
-
-    // Build the protocol://ip:port combinations
-    const proxyList = proxies.map(proxy => `${proxy.protocols[0]}://${proxy.ip}:${proxy.port}`);
-
-    // Return the populated proxyList
-    return proxyList;
-
-  } catch (error) {
-    console.error("Error fetching proxies:", error.message);
-    return []; // Return an empty array in case of an error
-  }
-}
-
-async function createRoundRobin() {
-  const proxyList = await populateProxyList();
-  let index = 0; // Keeps track of the current position
-
-  return function() {
-    const result = proxyList[index]; // Get the string at the current index
-    index = (index + 1) % proxyList.length; // Move to the next index, wrap around if at the end
-    return result;
-  };
-}
-
-
 
 // Function to initialize the SQLite database and create the tables
 function initDb() {
@@ -126,12 +90,11 @@ function getNotScrapedPage(db) {
 // Function to insert data into the websites table
 function insertWebsiteData(db, website, ip) {
     const stmt = db.prepare('INSERT INTO websites (website, ip) VALUES (?, ?)');
-    console.log(`Inserting ${website} with IP ${ip}`);
+    console.log({"website": website, "ip": ip});
     stmt.run(website, ip, function(err) {
         if (err) {
             console.error('Error inserting data into websites table:', err);
-        } else {
-            // console.log(`Inserted ${website} with IP ${ip}`);
+		    // throw `failed to insert data: ${err}`
         }
     });
     stmt.finalize();
@@ -161,27 +124,24 @@ async function scrapePage(pageNum, db, browser) {
     await page.setRequestInterception(true);
     page.on('request', request => {
         const resourceType = request.resourceType();
-        if (['image', 'font'].includes(resourceType)) {
+        if (['font'].includes(resourceType)) {
           request.abort(); // Block these resources
         } else {
           request.continue();
         }
     });
-
-
+    await openPage(page, pageNum)
 	try {
 		while (pageNum) {
-		    const waitForOneSecond = () => new Promise(resolve => setTimeout(resolve, 1000));
-            await waitForOneSecond();
 		    const scraped = await alreadyScraped(db, pageNum)  
-		    if (scraped == false) {
+		    if (!scraped) {
 			    await scrapeWebsiteTable(db, page, pageNum)
 			}
-		    pageNum = await getNotScrapedPage(db)
-		    if (pageNum == null) {
+		    minPageNumWithFailedScrape = await getNotScrapedPage(db)
+		    if (minPageNumWithFailedScrape == null) {
 				pageNum = await clickOnNextPage(page)
 			} else {
-				await openPage(page, pageNum)
+				await openPage(page, minPageNumWithFailedScrape)
 			}
 		}
 	} catch(error) {
@@ -192,8 +152,8 @@ async function scrapePage(pageNum, db, browser) {
 }
 
 async function openPage(page, pageNum) {
-    console.log(`Opening new page ${pageNum} from url...`);
     const url = `https://myip.ms/browse/sites/${pageNum}/ipID/23.227.38.0/ipIDii/23.227.38.255/sort/6/asc/1`;
+    console.log(`Opening new page: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded' });
 }
 
@@ -205,9 +165,9 @@ async function scrapeWebsiteTable(db, page, pageNum) {
           const text = await page.$eval('a#tablink-1.ui-tabs-anchor', el => el.textContent);
           // Log the result
           if (text.includes("You have exceeded page visit limit")) {
-            // console.log("exceeded ratelimit for current ip/proxy");
-             // process.exit()
-		     throw `exceeded ratelimit for current ip/proxy`;
+              //console.log("exceeded ratelimit for current ip/proxy");
+              //process.exit()
+		      throw `exceeded ratelimit for current ip/proxy`;
           } else {
             // console.log("Text not found.");
           }
@@ -263,18 +223,27 @@ async function clickOnNextPage(page) {
 
         // Get the next anchor tag
         const nextLink = links[currentIndex + 1];
-        if (nextLink) {
-		    const pageNumber = nextLink.textContent.trim();
-            nextLink.click(); // Click the next link
-            return pageNumber;
-        }
-        return null;
-    });
+        if (nextLink == null) return false;
+        const pageNumber = nextLink.textContent.trim();
+        nextLink.click(); // Click the next link
+        return pageNumber;
+		});
+
+        // console.log('Waiting for "Please wait" overlay to disappear...');
+        await page.waitForSelector('.overlay.ovrsites_tbl', { visible: true });
+        await page.waitForFunction(() => !document.querySelector('.overlay.ovrsites_tbl'), {timeout: 6000});
+
+        await page.on('dialog', async (dialog) => {
+            console.log(`dialog appeared: ${dialog.message()}`);
+            await dialog.accept();
+		    await page.reload();
+        });
+      
 		} catch(error) {
 			throw `failed to click on next page: ${error}`
 		} finally {
 		   if (nextPage) {
-    	       console.log(`Next page clicked! Link text: "${nextPage}"`);
+    	       console.log(`Next page clicked and loaded: "${nextPage}"`);
 		   	return nextPage
     	   } else {
     	       throw 'Failed to click the next page (maybe already on the last page).';
@@ -286,6 +255,7 @@ async function clickOnNextPage(page) {
 async function scrapeData() {
     // Initialize SQLite database and tables
     const db = initDb();
+		//TODO: capture local storeage : _grecaptcha
 
     const browser = await puppeteer.launch({
         headless: false, // Launch Chrome with UI (non-headless mode)
@@ -293,19 +263,14 @@ async function scrapeData() {
         args: ['--no-sandbox', '--disable-setuid-sandbox', `--proxy-server=${proxyList[3]}`],
     });
 
-    //const proxyHost = await createRoundRobin();
-
     // Loop through pages 1 to 13500 (or any other number you choose)
     for (let pageNum = 1; pageNum <= 13500; pageNum++) {
         const scraped = await alreadyScraped(db, pageNum);
 		if (scraped == false) {
 		   console.log(`Scraping page ${pageNum}...`);
            await scrapePage(pageNum, db, browser);
-		} else { 
-		   console.log(`Already scraped page ${pageNum}`);
 		}
     }
-
     // Close the database connection after all pages are scraped
     db.close();
 }
