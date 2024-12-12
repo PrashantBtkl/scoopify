@@ -234,7 +234,6 @@ async function clickOnNextPage(page) {
         await page.waitForFunction(() => !document.querySelector('.overlay.ovrsites_tbl'), {timeout: 6000});
 
         await page.on('dialog', async (dialog) => {
-            console.log(`dialog appeared: ${dialog.message()}`);
             await dialog.accept();
 		    await page.reload();
         });
@@ -260,7 +259,8 @@ async function scrapeData() {
     const browser = await puppeteer.launch({
         headless: false, // Launch Chrome with UI (non-headless mode)
         executablePath: '/usr/bin/google-chrome', // Specify the path to your installed Chrome
-        args: ['--no-sandbox', '--disable-setuid-sandbox', `--proxy-server=${proxyList[3]}`],
+        args: ['--no-sandbox', '--disable-setuid-sandbox', `--proxy-server=${proxyList[9]}`],
+        // args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
 
     // Loop through pages 1 to 13500 (or any other number you choose)
