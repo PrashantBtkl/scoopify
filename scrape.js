@@ -1,20 +1,6 @@
 const puppeteer = require('puppeteer');
 const sqlite3 = require('sqlite3').verbose();
 
-const proxyUser = 'xjkpsblg';
-const proxyPass = 'ql6ktu3k13bm';
-const proxyList = [
-'198.23.239.134:6540'
-,'207.244.217.165:6712'
-,'107.172.163.27:6543'
-,'64.137.42.112:5157'
-,'173.211.0.148:6641'
-,'161.123.152.115:6360'
-,'167.160.180.203:6754'
-,'154.36.110.199:6853'
-,'173.0.9.70:5653'
-,'173.0.9.209:5792']
-
 // Function to initialize the SQLite database and create the tables
 function initDb() {
     const db = new sqlite3.Database('scraped_data.db', (err) => {
@@ -116,10 +102,6 @@ function insertScrapeResult(db, page, success) {
 // Function to scrape a page
 async function scrapePage(pageNum, db, browser) {
     const page = await browser.newPage();
-	await page.authenticate({
-		username: proxyUser, 
-		password: proxyPass 
-	  });
 
     await page.setRequestInterception(true);
     page.on('request', request => {
@@ -254,12 +236,11 @@ async function clickOnNextPage(page) {
 async function scrapeData() {
     // Initialize SQLite database and tables
     const db = initDb();
-		//TODO: capture local storeage : _grecaptcha
-
+    //TODO: capture local storeage : _grecaptcha
     const browser = await puppeteer.launch({
         headless: false, // Launch Chrome with UI (non-headless mode)
         executablePath: '/usr/bin/google-chrome', // Specify the path to your installed Chrome
-        args: ['--no-sandbox', '--disable-setuid-sandbox', `--proxy-server=${proxyList[9]}`],
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
         // args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
 
