@@ -8,8 +8,7 @@ A Node.js script that scrapes and stores domain information of Shopify stores us
 
 ### Installation
 ```bash
-git clone https://github.com/PrashantBtkl/scoopify &&
-npm install puppeteer sqlite3
+git clone https://github.com/PrashantBtkl/scoopify && npm install
 ```
 
 ### Usage
